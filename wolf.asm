@@ -127,6 +127,60 @@ proc keyboard_handler
 endp keyboard_handler
 
 
+; toPos(x, y) -> y * 320 + x
+proc to_pos
+    push bp
+    mov bp, sp
+    pusha
+
+	mov dx, 0
+    mov ax, [bp+4] ; y
+    mov cx, 320
+    mul cx ; y * 320
+
+    add ax, [bp+6] ; y * 320 + x
+
+    mov [bp+6], ax
+
+    popa
+    pop bp
+
+    ret 2
+endp to_pos
+
+
+; draw_rect(x, y, width, height, color)
+proc draw_rect
+    push bp
+    mov bp, sp
+    pusha
+
+    mov cx, [bp+6] ; height
+    draw_rect_collumn:
+        dec cx
+        mov ax, [bp+8] ; width
+        draw_rect_line:
+            dec ax
+            mov di, ax
+            add di, [bp+12]
+            push di
+            mov di, cx
+            add di, [bp+10]
+            push di
+            call to_pos
+            pop si ; pos
+            mov dx, [bp+4]
+            mov [es:si], dl
+            cmp ax, 0
+            jne draw_rect_line
+        cmp cx, 0
+        jne draw_rect_collumn
+
+    popa
+    pop bp
+    ret 10
+endp draw_rect
+
 proc delay
     pusha
 
@@ -140,43 +194,37 @@ proc delay
 endp delay
 
 
-proc draw_keyboard_buffer
-    pusha
-
-    mov di, 80 * 40 + 40
-    mov bx, offset keyboardState
-    mov cx, 0
-    draw_kbf_loopstart:
-        mov bx, offset keyboardState
-        add bx, cx
-        mov dh, [bx]
-        mov dl, 0Ah
-        add dh, 48
-        mov [es:di], dx
-        add di, 2
-        inc cx
-        cmp cx, 7
-        jne draw_kbf_loopstart
-    popa
-    ret
-endp draw_keyboard_buffer
-
-
 proc main
     pusha
 
     finit
-    mov di, 0B800h
+
+    mov di, 0A000h
     mov es, di
 
+    mov ax, 13h
+    int 10h
+
     main_loopstart:
-        call draw_keyboard_buffer
-        mov bx, offset keyboardState
-        add bx, 6
-        call delay
+        mov ax, 100
+        push ax
+        push ax
+        push ax
+        push ax
+        mov ax, 1
+        push ax
+        call draw_rect
+
+        ;call delay
+
+        mov bx, offset keyboardState + 6
         mov al, [bx]
         cmp al, 1
         jne main_loopstart
+
+
+    mov al, 03h
+    int 10h
 
     popa
     ret
