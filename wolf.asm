@@ -41,11 +41,13 @@ proc change_handler_and_run_main
 	                                 ; put my keyboard (9) ISR address: procedure irq1isr
     mov     [word ptr es:9*4], offset keyboard_handler
 	                                 ; put cs in ISR address
-    mov     [es:9*4+2],        cs
+    mov     [es:9*4+2], cs
     sti                               ; interrupts enabled
 
     call    main                     ; program that use the interrupt  lines 43 - 83
 
+    xor ax, ax
+    mov es, ax
     cli                               ; interrupts disabled
     pop     [word ptr es:9*4]         ; restore ISR address
     pop     [word ptr es:9*4+2]
@@ -54,11 +56,13 @@ proc change_handler_and_run_main
     ret
 endp change_handler_and_run_main
 
+
 proc keyboard_handler
+    pusha
     in al, 60h
 
     xor bh, bh
-    mov al, al
+    mov bl, al
     and bl, 7Fh ; bl = scancode
 
     ; si = keyboardState offset
@@ -118,8 +122,10 @@ proc keyboard_handler
     mov     al, 20h
     out     20h, al
 
+    popa
     iret
 endp keyboard_handler
+
 
 proc delay
     pusha
@@ -133,11 +139,13 @@ proc delay
     ret
 endp delay
 
+
 proc draw_keyboard_buffer
+    pusha
 
     mov di, 80 * 40 + 40
     mov bx, offset keyboardState
-    mov cx, 6
+    mov cx, 0
     draw_kbf_loopstart:
         mov bx, offset keyboardState
         add bx, cx
@@ -145,13 +153,17 @@ proc draw_keyboard_buffer
         mov dl, 0Ah
         add dh, 48
         mov [es:di], dx
-        dec di
-        loop draw_kbf_loopstart    
-
+        add di, 2
+        inc cx
+        cmp cx, 7
+        jne draw_kbf_loopstart
+    popa
     ret
 endp draw_keyboard_buffer
 
+
 proc main
+    pusha
 
     finit
     mov di, 0B800h
@@ -161,11 +173,12 @@ proc main
         call draw_keyboard_buffer
         mov bx, offset keyboardState
         add bx, 6
-        mov ax, [bx]
         call delay
-        cmp ax, 1
+        mov al, [bx]
+        cmp al, 1
         jne main_loopstart
 
+    popa
     ret
 endp main
 
