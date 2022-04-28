@@ -10,6 +10,7 @@ DATASEG
 
 TWO_PI dd ? ; set up once in main
 ZERO dd 0.0
+HALF dd 0.5
 
 PLAYER_WIDTH dw 6
 PLAYER_HEIGHT dw 6
@@ -42,13 +43,13 @@ draw_line_half_width dw ?
 draw_player_fpu_out dw ?
 ;-----------------;
 
-;---cast_ray---; ds:62
+;---cast_ray---; ds:66
 cast_ray_a_tan dd 0.123
 cast_ray_is_looking_up dw 0
 cast_ray_fpu_io dw ?
 cast_ray_ray_y dd ?
 cast_ray_ray_x dd ?
-cast_ray_accuracy_number dd 0.0001
+cast_ray_accuracy_number dd 1.0
 cast_ray_storage dw ?
 ;--------------;
 
@@ -58,7 +59,7 @@ cast_ray_storage dw ?
 
 player_x dw 36h
 player_y dw 36h
-player_angle dd 4.5
+player_angle dd 1.1
 
 keyboard_state db 7 dup(0) ; w, a, s, d, dot, comma, esc
 
@@ -197,6 +198,32 @@ proc divd
     pop bp
     ret 2
 endp divd
+
+; round_down() -> None
+; sets ST(0) to floor(ST(0))
+proc round_towards_zero
+    pusha
+    fld [dword ptr offset ZERO] ; ST(0) = 0
+                                ; ST(1) = x
+    fcomp
+    fnstsw ax
+    sahf
+    ja round_towards_zero_bellow_zero
+
+    round_towards_zero_above_zero:
+        fld [dword ptr offset HALF]
+        fsubp
+        frndint
+        jmp round_towards_zero_skip
+    round_towards_zero_bellow_zero:
+        fld [dword ptr offset HALF]
+        faddp
+        frndint
+    round_towards_zero_skip:
+
+    popa
+    ret
+endp round_towards_zero
 
 ; cos_angle_times_speed() -> ST(0) = cos(player_angle) * player_speed
 proc cos_angle_times_speed
@@ -657,7 +684,7 @@ proc move_player
         fcomp
         fnstsw ax
         sahf
-        jb move_player_comma_skip_reset_angle
+        ja move_player_comma_skip_reset_angle
             fld [dword ptr TWO_PI]
             fsubp
         move_player_comma_skip_reset_angle:
@@ -787,77 +814,76 @@ proc cast_rays
     cast_ray_loopstart:
         fld [dword ptr offset cast_ray_ray_x]
         fistp [word ptr offset cast_ray_fpu_io]
-        ; bx = mapX | dx = mapY
         mov bx, [offset cast_ray_fpu_io]
         shr bx, 4 ; bx = mapX = ray_x / 16 | change if block size changes
         fld [dword ptr offset cast_ray_ray_y]
         fistp [word ptr offset cast_ray_fpu_io]
         mov dx, [offset cast_ray_fpu_io]
-        shr dx, 4 ; dx = mapY = ray_y / 16 | change if block size changes
-        
-        push dx
-        mov di, [offset MAP_WIDTH]
-        push di
-        call mult
-        pop di ; map_y * MAP_WIDTH
-        add di, bx ; map_y * MAP_WIDTH + map_x
-        cmp di, 0
-        jl cast_ray_in_map_bounds_or_clear_tile_skip
+        shr dx, 4 ; dx = mapY = ray_y /16 | change if block size changes
 
-        push di
-        ;----------------------;
-        push [word ptr offset MAP_WIDTH]
-        push [word ptr offset MAP_HEIGHT]
-        call mult
-        pop di
-        mov [offset cast_ray_storage], di
-        ;----------------------;
-        pop di
-        cmp di, ax
-        jge cast_ray_in_map_bounds_or_clear_tile_skip
+        ; bx = mapX | dx = mapY
+        cmp bx, 0
+        jl cast_ray_out_of_bounds_skip
+
+        cmp dx, 0
+        jl cast_ray_out_of_bounds_skip
+
+        cmp bx, [word ptr offset MAP_WIDTH]
+        jge cast_ray_out_of_bounds_skip
+
+        cmp dx, [word ptr offset MAP_HEIGHT]
+        jge cast_ray_out_of_bounds_skip
+
         push bx
         push dx
         call at_map
-        pop di
+        pop di ; map[y][x]
         cmp di, 0
-        je cast_ray_in_map_bounds_or_clear_tile_skip
-            mov si, 8
-            jmp cast_ray_in_loop_skip
-        cast_ray_in_map_bounds_or_clear_tile_skip:
+        jne cast_ray_wall_tile
+
+        cast_ray_clear_tile:
             ; ray_x += jumpX | ray_y += jumpY | dof += 1
             fld [dword ptr offset cast_ray_ray_x]
             mov [offset cast_ray_fpu_io], cx
+            fild [word ptr offset cast_ray_fpu_io]
             faddp
             fstp [dword ptr offset cast_ray_ray_x]
+            ; #works
 
             fld [dword ptr offset cast_ray_ray_y]
             mov [offset cast_ray_fpu_io], ax
+            fild [word ptr offset cast_ray_fpu_io]
             faddp
             fstp [dword ptr offset cast_ray_ray_y]
 
             inc si
+            jmp cast_ray_in_loop_skip
+        cast_ray_wall_tile:
+            mov si, 8
         cast_ray_in_loop_skip:
 
         cmp si, 8
         jb cast_ray_loopstart
+    cast_ray_out_of_bounds_skip:
 
-
-    mov bx, offset cast_ray_a_tan ;deleteme
     ; draw_rect(ray_x, ray_y, width, width, 2 (green))
     fld [dword ptr offset cast_ray_ray_x]
+    call round_towards_zero
     fistp [word ptr offset cast_ray_fpu_io]
     mov cx, [offset cast_ray_fpu_io] ; ray_x
     fld [dword ptr offset cast_ray_ray_y]
+    call round_towards_zero
     fistp [word ptr offset cast_ray_fpu_io]
     mov ax, [offset cast_ray_fpu_io] ; ray_y
     mov bx, [offset PLAYER_WIDTH]
     mov di, 2 ; green
 
+
     push cx
     push ax
     push bx
     push bx
-    push dx
+    push di
     call draw_rect
 
     cast_ray_skip2:
@@ -883,25 +909,19 @@ proc main
     faddp
     fstp [dword ptr TWO_PI]
 
-    mov di, 1
+    mov di, 0
 
     main_loopstart:
 
         ; game logic ;
         call move_player
-        call cast_rays
 
         ; game graphics ;
         call clear_screen
 
         call draw_map
         call draw_player
-
-        inc di
-        cmp di, 100
-        jne skip123
-            mov di, 1
-        skip123:
+        call cast_rays
 
         call draw_pressed_keys
 
