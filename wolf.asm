@@ -11,6 +11,8 @@ DATASEG
 TWO_PI dd ? ; set up once in main
 ZERO dd 0.0
 HALF dd 0.5
+ONE dd 1.0
+DEG2RAD dd 0.0174533 ; multiply degrees by this for rads
 
 PLAYER_WIDTH dw 6
 PLAYER_HEIGHT dw 6
@@ -20,6 +22,9 @@ PLAYER_TURN_SPEED dd 0.1
 BLOCK_SIZE dw 16
 MAP_WIDTH dw 8
 MAP_HEIGHT dw 8
+dw ?
+dw ?
+dw ?
 MAP db 1,1,1,1,1,1,1,1
     db 1,0,0,0,0,0,0,1
     db 1,0,0,0,0,0,0,1
@@ -36,22 +41,34 @@ DRAW_DIRECTION_SCALE dd 8.0
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;---draw_line---;
-draw_line_half_width dw ?
+draw_line_fpu_io dd ?
+draw_line_delta_x dd ?
+draw_line_delta_y dd ?
+draw_line_x dd ?
+draw_line_y dd ?
 ;---------------;
 
 ;---draw_player---;
 draw_player_fpu_out dw ?
 ;-----------------;
 
-;---cast_ray---; ds:66
-cast_ray_a_tan dd 0.123
-cast_ray_is_looking_up dw 0
+;---cast_ray---;
+cast_ray_a_tan dd ?
+cast_ray_negative_tan dd ?
+cast_ray_is_looking_up dw 0 ; ds:8A
 cast_ray_fpu_io dw ?
-cast_ray_ray_y dd ?
+cast_ray_ray_y dd ? ; ds:92
 cast_ray_ray_x dd ?
+cast_ray_jump_y dd ?
+cast_ray_jump_x dd ?
+cast_ray_ray_angle dd ?
 cast_ray_accuracy_number dd 1.0
 cast_ray_storage dw ?
 ;--------------;
+
+;---main---;
+asdf dd 0.5
+;----------;
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;GLOBAL;;;VARIABLES;;;;;;;;;;;
@@ -59,12 +76,20 @@ cast_ray_storage dw ?
 
 player_x dw 36h
 player_y dw 36h
-player_angle dd 1.1
+player_angle dd 0.9
 
-keyboard_state db 7 dup(0) ; w, a, s, d, dot, comma, esc
+keyboard_state db 8 dup(0) ; w, a, s, d, dot, comma, esc, space
 
+MAP2 db 1,1,1,1,1,1,1,1
+     db 1,0,0,0,0,0,0,1
+     db 1,0,0,0,0,0,0,1
+     db 1,0,0,0,0,0,0,1
+     db 1,0,0,0,0,0,0,1
+     db 1,0,0,0,0,1,0,1
+     db 1,0,0,0,0,0,0,1
+     db 1,1,1,1,1,1,1,1
 
-back_buffer db 320*200 dup(1)
+back_buffer db 320*200 dup(8)
 
 
 CODESEG
@@ -136,8 +161,13 @@ proc keyboard_handler
         jmp press_check
     check_esc:
         cmp bl, 1h
-        jne press_check
+        jne check_space
         mov si, 6
+        jmp press_check
+    check_space:
+        cmp bl, 39h
+        jne press_check
+        mov si, 7
         jmp press_check
 
     press_check:
@@ -348,9 +378,12 @@ proc draw_rect
             push di
             call to_pos
             pop si ; pos
-            add si, offset back_buffer
-            mov dx, [bp+4]
-            mov [si], dl
+            cmp si, 320 * 200
+            ja draw_rect_out_of_bounds_skip
+                add si, offset back_buffer
+                mov dx, [bp+4]
+                mov [si], dl
+            draw_rect_out_of_bounds_skip:
             cmp ax, 0
             jne draw_rect_line
         cmp cx, 0
@@ -360,6 +393,225 @@ proc draw_rect
     pop bp
     ret 10
 endp draw_rect
+
+; draw_line(x1, y1, x2, y2, width, color) -> None
+proc draw_line
+	push bp
+	mov bp, sp
+	pusha
+
+	fild [word ptr offset bp+14]
+	fstp [dword ptr offset draw_line_x]
+
+	fild [word ptr offset bp+12]
+	fstp [dword ptr offset draw_line_y]
+
+	mov ax, [bp+10] ; x2
+	sub ax, [bp+14] ; x2 - x1
+	jnc draw_line_total_x_no_carry
+		neg ax
+	draw_line_total_x_no_carry:
+	mov bx, [bp+10]
+	sub bx, [bp+14] ; x2 - x1
+	; ax = abs(x2 - x1)
+	; bx = x2 - x1
+
+	mov cx, [bp+8]
+	sub cx, [bp+12] ; y2 - y1
+	jnc draw_line_total_y_no_carry
+		neg cx
+	draw_line_total_y_no_carry:
+	mov dx, [bp+8]
+	sub dx, [bp+12] ; y2 - y1
+	; cx = abs(y2 - y1)
+	; dx = y2 - y1
+
+	; if abs(y2 - y1) > abs(x2 - x1): goto draw_line_total_y_larger
+	cmp cx, ax
+	ja draw_line_total_y_larger
+
+	; ax = abs(x2 - x1) | bx = x2 - x1 | cx = abs(y2 - y1) | dx = y2 - y1
+	draw_line_total_x_larger:
+		; deltaX = (x2 - x1) / abs(x2 - x1)
+		; deltaY = (y2 - y1) / abs(x2 - x1)
+		mov [offset draw_line_fpu_io], bx ; x2 - x1
+		fild [word ptr offset draw_line_fpu_io]
+		mov [offset draw_line_fpu_io], ax ; abs(x2 - x1)
+		fild [word ptr offset draw_line_fpu_io]
+		fdivp ; (x2 - x1) / abs(x2 - x1)
+		fstp [dword ptr offset draw_line_delta_x]
+
+		mov [offset draw_line_fpu_io], dx ; y2 - y1
+		fild [word ptr offset draw_line_fpu_io]
+		mov [offset draw_line_fpu_io], ax ; abs(x2 - x1)
+		fild [word ptr offset draw_line_fpu_io]
+		fdivp ; (y2 - y1) / abs(y2 - y1)
+		fstp [dword ptr offset draw_line_delta_y]
+
+		mov si, ax ; si = test = abs(x2 - x1)
+		mov di, 0  ; di = control = 0
+		draw_line_total_x_larger_loopstart:
+			; draw_rect(x, y, width, width, 5 (purple))
+			push ax
+			;-------;
+			fld [dword ptr offset draw_line_x]
+			fistp [word ptr offset draw_line_fpu_io]
+			mov ax, [offset draw_line_fpu_io]
+			push ax
+			fld [dword ptr offset draw_line_y]
+			fistp [word ptr offset draw_line_fpu_io]
+			mov ax, [offset draw_line_fpu_io]
+			push ax
+			push [word ptr offset bp+6]
+			push [word ptr offset bp+6]
+			push [word ptr offset bp+4]
+			call draw_rect
+			;-------;
+			pop ax
+
+			fld [dword ptr offset draw_line_x]
+			fld [dword ptr offset draw_line_delta_x]
+			faddp ; x + delta_x
+			fstp [dword ptr offset draw_line_x]
+
+			fld [dword ptr offset draw_line_y]
+			fld [dword ptr offset draw_line_delta_y]
+			faddp ; y + delta_y
+			fstp [dword ptr offset draw_line_y]
+
+			inc di
+			cmp di, si ; for i in range(x2 - x1)
+			jb draw_line_total_x_larger_loopstart
+
+		jmp draw_line_larger_skip
+	draw_line_total_y_larger:
+		; deltaX = (x2 - x1) / abs(y2 - y1)
+		; deltaY = (y2 - y1) / abs(y2 - y1)
+		mov [offset draw_line_fpu_io], bx
+		fild [word ptr offset draw_line_fpu_io]
+		mov [offset draw_line_fpu_io], cx
+		fild [word ptr offset draw_line_fpu_io]
+		fdivp ; (x2 - x1) / abs(y2 - y1)
+		fstp [dword ptr offset draw_line_delta_x]
+
+		mov [offset draw_line_fpu_io], dx
+		fild [word ptr offset draw_line_fpu_io]
+		mov [offset draw_line_fpu_io], cx
+		fdivp ; (y2 - y1) / abs(y2 - y1)
+		fstp [dword ptr offset draw_line_delta_y]
+
+		mov si, cx ; si = test = abs(y2 - y1)
+		mov di, 0  ; di = control = 0
+		draw_line_total_y_larger_loopstart:
+			; draw_rect(x, y, width, width, color)
+			push ax
+			;-------;
+			fld [dword ptr offset draw_line_x]
+			fistp [word ptr offset draw_line_fpu_io]
+			mov ax, [offset draw_line_fpu_io]
+			push ax
+			fld [dword ptr offset draw_line_y]
+			fistp [word ptr offset draw_line_fpu_io]
+			mov ax, [offset draw_line_fpu_io]
+			push ax
+			push [word ptr offset bp+6]
+			push [word ptr offset bp+6]
+			push [word ptr offset bp+4]
+			call draw_rect
+			;-------;
+			pop ax
+
+			fld [dword ptr offset draw_line_x]
+			fld [dword ptr offset draw_line_delta_x]
+			faddp ; x + delta_x
+			fstp [dword ptr offset draw_line_x]
+
+			fld [dword ptr offset draw_line_y]
+			fld [dword ptr offset draw_line_delta_y]
+			faddp ; y + delta_y
+			fstp [dword ptr offset draw_line_y]
+
+			inc di
+			cmp di, si ; for i in range(x2 - x1)
+			jb draw_line_total_x_larger_loopstart
+
+	draw_line_larger_skip:
+
+	popa
+	pop bp
+	ret 12
+endp draw_line
+
+; draw_player() -> None
+proc draw_player
+    push bp
+    mov bp, sp
+    pusha
+
+    mov ax, [offset player_y] ; player y
+    mov cx, [offset player_x] ; player x
+    mov bx, [offset PLAYER_WIDTH] ; player width
+    mov dx, [offset PLAYER_HEIGHT] ; player height
+
+    mov di, [offset PLAYER_WIDTH]
+    shr di, 1 ; player_width / 2
+
+    mov si, [offset PLAYER_HEIGHT]
+    shr si, 1 ; player_height / 2
+
+    sub cx, di
+    sub ax, si
+
+    push cx ; ->rect x
+    push ax ; ->rect y
+    push bx ; ->rect width
+    push dx ; ->rect height
+    mov ax, 0Ch ; player color (red)
+    push ax ; ->rect color
+    call draw_rect
+
+    ; player_x + cos(player_angle) * player_speed * scale
+    call cos_angle_times_speed ; cos(player_angle) * player_speed
+    fld [dword ptr DRAW_DIRECTION_SCALE]
+    fmulp ; cos(player_angle) * player_speed * scale
+    fild [word ptr player_x]
+    faddp ; player_x + cos(player_angle) * player_speed * scale
+    fistp [word ptr draw_player_fpu_out]
+    mov bx, [word ptr draw_player_fpu_out]
+
+    ; player_y + sin(player_angle) * player_speed * scale
+    call sin_angle_times_speed ; sin(player_angle) * player_speed
+    fld [dword ptr DRAW_DIRECTION_SCALE]
+    fmulp ; sin(player_angle) * player_speed * scale
+    fild [word ptr player_y]
+    faddp ; player_y + sin(player_angle) * player_speed * scale
+    fistp [word ptr draw_player_fpu_out]
+    mov di, [word ptr draw_player_fpu_out]
+
+    mov dx, 1 ; half of width/height
+    sub bx, dx
+    sub di, dx
+
+    ; di = player_y + sin(player_angle) * player_speed * scale
+    ; bx = player_x + sin(player_angle) * player_speed * scale
+
+    mov cx, [offset player_x]
+    mov ax, [offset player_y]
+
+    ; ax, bx, di
+    push bx ; ->rect x
+    push di ; ->rect y
+    mov ax, 2 ; width, height
+    push ax ; ->rect width
+    push ax ; ->rect height
+    mov ax, 0Ch ; color (red)
+    push ax ; ->rect color
+    call draw_rect
+
+    popa
+    pop bp
+    ret
+endp draw_player
 
 ; draw_map() -> None
 proc draw_map
@@ -428,70 +680,7 @@ proc draw_map
     ret
 endp draw_map
 
-; draw_player() -> None
-proc draw_player
-    push bp
-    mov bp, sp
-    pusha
 
-    mov ax, [offset player_y] ; player y
-    mov cx, [offset player_x] ; player x
-    mov bx, [offset PLAYER_WIDTH] ; player width
-    mov dx, [offset PLAYER_HEIGHT] ; player height
-
-    mov di, [offset PLAYER_WIDTH]
-    shr di, 1 ; player_width / 2
-
-    mov si, [offset PLAYER_HEIGHT]
-    shr si, 1 ; player_height / 2
-
-    sub cx, di
-    sub ax, si
-
-    push cx ; ->rect x
-    push ax ; ->rect y
-    push bx ; ->rect width
-    push dx ; ->rect height
-    mov ax, 0Ch ; player color (red)
-    push ax ; ->rect color
-    call draw_rect
-
-    ; player_x + cos(player_angle) * player_speed * scale
-    call cos_angle_times_speed ; cos(player_angle) * player_speed
-    fld [dword ptr DRAW_DIRECTION_SCALE]
-    fmulp ; cos(player_angle) * player_speed * scale
-    fild [word ptr player_x]
-    faddp ; player_x + cos(player_angle) * player_speed * scale
-    fistp [word ptr draw_player_fpu_out]
-    mov bx, [word ptr draw_player_fpu_out]
-
-    ; player_y + sin(player_angle) * player_speed * scale
-    call sin_angle_times_speed ; sin(player_angle) * player_speed
-    fld [dword ptr DRAW_DIRECTION_SCALE]
-    fmulp ; sin(player_angle) * player_speed * scale
-    fild [word ptr player_y]
-    faddp ; player_y + sin(player_angle) * player_speed * scale
-    fistp [word ptr draw_player_fpu_out]
-    mov di, [word ptr draw_player_fpu_out]
-
-    mov dx, 1 ; half of width/height
-    sub bx, dx
-    sub di, dx
-
-    ; ax, bx, di
-    push bx ; ->rect x
-    push di ; ->rect y
-    mov ax, 2 ; width, height
-    push ax ; ->rect width
-    push ax ; ->rect height
-    mov ax, 0Ch ; color (red)
-    push ax ; ->rect color
-    call draw_rect
-
-    popa
-    pop bp
-    ret
-endp draw_player
 
 ; draw_pressed_keys() -> None
 proc draw_pressed_keys
@@ -520,7 +709,7 @@ proc draw_pressed_keys
         call draw_rect
         inc bx
         add ax, 10
-        cmp ax, 240
+        cmp ax, 280
         jne draw_pressed_loopstart
 
     popa
@@ -698,8 +887,8 @@ proc move_player
     ret
 endp move_player
 
-; cast_rays() -> None
-proc cast_rays
+; cast_ray([float] *offset) -> None
+proc cast_ray
     push bp
     mov bp, sp
     pusha
@@ -707,7 +896,38 @@ proc cast_rays
     ; si = dof
     mov si, 0
 
-    fld [dword ptr offset player_angle] ; player_angle
+    mov bx, [bp+4]
+    fld [dword ptr offset player_angle]
+    fld [dword ptr bx]
+    faddp
+    fstp [dword ptr offset cast_ray_ray_angle]
+
+
+    fld [dword ptr ZERO]
+    fld [dword ptr offset cast_ray_ray_angle]
+    fcompp
+    fnstsw ax
+    sahf ; cmp ray_angle, 0
+    ja cast_ray_ray_angle_not_bellow_zero
+        fld [dword ptr offset TWO_PI]
+        fld [dword ptr offset cast_ray_ray_angle]
+        faddp ; ray_angle + 2 * PI
+        fstp [dword ptr offset cast_ray_ray_angle]
+    cast_ray_ray_angle_not_bellow_zero:
+
+    fld [dword ptr offset TWO_PI]
+    fld [dword ptr offset cast_ray_ray_angle]
+    fcompp
+    fnstsw ax
+    sahf ; cmp ray_angle, 2 * PI
+    jb cast_ray_ray_angle_not_above_two_pi
+        fld [dword ptr offset cast_ray_ray_angle]
+        fld [dword ptr offset TWO_PI]
+        fsubp ; ray_angle - 2 * PI
+        fstp [dword ptr offset cast_ray_ray_angle]
+    cast_ray_ray_angle_not_above_two_pi:
+
+    fld [dword ptr offset cast_ray_ray_angle] ; player_angle
     fptan
     fmulp ; tan(player_angle) #works
     mov bx, 1
@@ -717,26 +937,32 @@ proc cast_rays
     fdivrp ; -1 / tan(player_angle)
     fstp [dword ptr offset cast_ray_a_tan]
 
+    fld [dword ptr offset cast_ray_ray_angle]
+    fptan
+    fmulp ; tan(player_angle)
+    fchs ; -tan(player_angle)
+    fstp [dword ptr offset cast_ray_negative_tan]
+
     ; check if player looking up or down
     fldpi
-    fld [dword ptr offset player_angle]
+    fld [dword ptr offset cast_ray_ray_angle]
     fcompp
     fnstsw ax
     sahf ; cmp player_angle, PI
-    jb cast_ray_looking_down
+    jb cast_ray_horizontal_looking_down
     sahf
-    je cast_ray_looking_left_or_right
+    je cast_ray_horizontal_looking_left_or_right
     fld [dword ptr offset ZERO]
-    fld [dword ptr offset player_angle]
+    fld [dword ptr offset cast_ray_ray_angle]
     fcompp
     fnstsw ax
     sahf
-    je cast_ray_looking_left_or_right
+    je cast_ray_horizontal_looking_left_or_right
 
     ; cx = jumpX
     ; ax = jumpY
 
-    cast_ray_looking_up:
+    cast_ray_horizontal_looking_up:
         mov ax, [offset player_y]
         shr ax, 4 ; change if block size changes
         shl ax, 4 ; change if block size changes
@@ -758,19 +984,18 @@ proc cast_rays
         faddp ; (player_y - ray_y) * a_tan + player_x
         fstp [dword ptr offset cast_ray_ray_x]
 
-        mov ax, [offset BLOCK_SIZE]
-        neg ax ; ax = -BLOCK_SIZE
+        fild [word ptr offset BLOCK_SIZE]
+        fchs ; -BLOCK_SIZE
+        fst [dword ptr offset cast_ray_jump_y]
 
-        mov cx, [offset BLOCK_SIZE]
-        mov [offset cast_ray_fpu_io], cx
-        fild [word ptr offset cast_ray_fpu_io]
+        ; ST(0) = jumpY
+        fchs ; -jumpY
         fld [dword ptr offset cast_ray_a_tan]
-        fmulp ; BLOCK_SIZE * a_tan
-        fistp [word ptr offset cast_ray_fpu_io]
-        mov cx, [offset cast_ray_fpu_io] ; cx = jumpX = BLOCK_SIZE * a_tan
+        fmulp ; -jumpY * -1 / tan(ray_angle)
+        fstp [dword ptr offset cast_ray_jump_x]
 
-        jmp cast_ray_skip1
-    cast_ray_looking_down:
+        jmp cast_ray_looking_up_or_down_skip
+    cast_ray_horizontal_looking_down:
         mov ax, [offset player_y]
         shr ax, 4 ; change if block size changes
         shl ax, 4 ; change if block size changes
@@ -788,83 +1013,26 @@ proc cast_rays
         faddp ; (player_y - ray_y) * a_tan + player_x
         fstp [dword ptr offset cast_ray_ray_x]
 
-        mov ax, [offset BLOCK_SIZE] ; ax = jumpY = BLOCK_SIZE
+        fild [word ptr offset BLOCK_SIZE]
+        ; BLOCK_SIZE
+        fst [dword ptr offset cast_ray_jump_y]
 
-        mov cx, [offset BLOCK_SIZE]
-        neg cx ; cx = -BLOCK_SIZE
-        mov [offset cast_ray_fpu_io], cx
-        fild [word ptr offset cast_ray_fpu_io]
+        ; ST(0) = jumpY
+        fchs ; -jumpY
         fld [dword ptr offset cast_ray_a_tan]
-        fmulp ; -BLOCK_SIZE * a_tan
-        fistp [word ptr offset cast_ray_fpu_io]
-        mov cx, [offset cast_ray_fpu_io] ; cx = jumpX = -BLOCK_SIZE * a_tan
+        fmulp ; -jumpY * -1 / tan(ray_angle)
+        fstp [dword ptr offset cast_ray_jump_x]
 
-        jmp cast_ray_skip1
+        jmp cast_ray_looking_up_or_down_skip
     
-    cast_ray_looking_left_or_right:
+    cast_ray_horizontal_looking_left_or_right:
         fild [word ptr offset player_x]
         fstp [dword ptr offset cast_ray_ray_x] ; ray_x = player_x
         fild [word ptr offset player_y]
         fstp [dword ptr offset cast_ray_ray_y] ; ray_y = player_y
         mov si, 8 ; dof = 8
-        jmp cast_ray_skip2
-    cast_ray_skip1:
-
-    ; ax=jumpY | bx=mapX | cx=jumpX | dx=mapY | di=free | si=dof
-    cast_ray_loopstart:
-        fld [dword ptr offset cast_ray_ray_x]
-        fistp [word ptr offset cast_ray_fpu_io]
-        mov bx, [offset cast_ray_fpu_io]
-        shr bx, 4 ; bx = mapX = ray_x / 16 | change if block size changes
-        fld [dword ptr offset cast_ray_ray_y]
-        fistp [word ptr offset cast_ray_fpu_io]
-        mov dx, [offset cast_ray_fpu_io]
-        shr dx, 4 ; dx = mapY = ray_y /16 | change if block size changes
-
-        ; bx = mapX | dx = mapY
-        cmp bx, 0
-        jl cast_ray_out_of_bounds_skip
-
-        cmp dx, 0
-        jl cast_ray_out_of_bounds_skip
-
-        cmp bx, [word ptr offset MAP_WIDTH]
-        jge cast_ray_out_of_bounds_skip
-
-        cmp dx, [word ptr offset MAP_HEIGHT]
-        jge cast_ray_out_of_bounds_skip
-
-        push bx
-        push dx
-        call at_map
-        pop di ; map[y][x]
-        cmp di, 0
-        jne cast_ray_wall_tile
-
-        cast_ray_clear_tile:
-            ; ray_x += jumpX | ray_y += jumpY | dof += 1
-            fld [dword ptr offset cast_ray_ray_x]
-            mov [offset cast_ray_fpu_io], cx
-            fild [word ptr offset cast_ray_fpu_io]
-            faddp
-            fstp [dword ptr offset cast_ray_ray_x]
-            ; #works
-
-            fld [dword ptr offset cast_ray_ray_y]
-            mov [offset cast_ray_fpu_io], ax
-            fild [word ptr offset cast_ray_fpu_io]
-            faddp
-            fstp [dword ptr offset cast_ray_ray_y]
-
-            inc si
-            jmp cast_ray_in_loop_skip
-        cast_ray_wall_tile:
-            mov si, 8
-        cast_ray_in_loop_skip:
-
-        cmp si, 8
-        jb cast_ray_loopstart
-    cast_ray_out_of_bounds_skip:
+        jmp cast_ray_horizontal_looking_left_or_right_skip
+    cast_ray_looking_up_or_down_skip:
 
     ; draw_rect(ray_x, ray_y, width, width, 2 (green))
     fld [dword ptr offset cast_ray_ray_x]
@@ -878,7 +1046,6 @@ proc cast_rays
     mov bx, [offset PLAYER_WIDTH]
     mov di, 2 ; green
 
-
     push cx
     push ax
     push bx
@@ -886,12 +1053,308 @@ proc cast_rays
     push di
     call draw_rect
 
-    cast_ray_skip2:
+    ; ax=free | bx=mapX | cx=free | dx=mapY | di=free | si=dof
+    cast_ray_horizontal_loopstart:
+        fld [dword ptr offset cast_ray_ray_x]
+        fistp [word ptr offset cast_ray_fpu_io] ; (int)ray_x
+        mov bx, [offset cast_ray_fpu_io]
+        shr bx, 4 ; bx = mapX = ray_x / 16 | change if block size changes
+        fld [dword ptr offset cast_ray_ray_y]
+        fistp [word ptr offset cast_ray_fpu_io] ;(int)ray_y
+        mov dx, [offset cast_ray_fpu_io]
+        shr dx, 4 ; dx = mapY = ray_y /16 | change if block size changes
+
+        ; bx = mapX | dx = mapY
+        cmp bx, 0
+        jl cast_ray_horizontal_out_of_bounds_skip
+
+        cmp dx, 0
+        jl cast_ray_horizontal_out_of_bounds_skip
+
+        cmp bx, [word ptr offset MAP_WIDTH]
+        jge cast_ray_horizontal_out_of_bounds_skip
+
+        cmp dx, [word ptr offset MAP_HEIGHT]
+        jge cast_ray_horizontal_out_of_bounds_skip
+
+        push bx
+        push dx
+        call at_map
+        pop di ; map[y][x]
+        cmp di, 0
+        jne cast_ray_horizontal_wall_tile
+
+        cast_ray_horizontal_clear_tile:
+
+            fld [dword ptr offset cast_ray_ray_x]
+            fld [dword ptr offset cast_ray_jump_x]
+            faddp ; ray_x + jump_x
+            fstp [dword ptr offset cast_ray_ray_x]
+
+            fld [dword ptr offset cast_ray_ray_y]
+            fld [dword ptr offset cast_ray_jump_y]
+            faddp ; ray_y + jump_y
+            fstp [dword ptr offset cast_ray_ray_y]
+
+            ; draw_rect(ray_x, ray_y, width, width, 2 (green))
+            fld [dword ptr offset cast_ray_ray_x]
+            call round_towards_zero
+            fistp [word ptr offset cast_ray_fpu_io]
+            mov cx, [offset cast_ray_fpu_io] ; ray_x
+            fld [dword ptr offset cast_ray_ray_y]
+            call round_towards_zero
+            fistp [word ptr offset cast_ray_fpu_io]
+            mov ax, [offset cast_ray_fpu_io] ; ray_y
+            mov bx, [offset PLAYER_WIDTH]
+            mov di, 2 ; green
+
+            push cx
+            push ax
+            push bx
+            push bx
+            push di
+            call draw_rect
+
+            inc si
+            jmp cast_ray_horizontal_in_loop_skip
+        cast_ray_horizontal_wall_tile:
+            mov si, 8
+        cast_ray_horizontal_in_loop_skip:
+
+        cmp si, 8
+        jb cast_ray_horizontal_loopstart
+    cast_ray_horizontal_out_of_bounds_skip:
+
+    cast_ray_horizontal_looking_left_or_right_skip:
+
+    ;--- vertical lines ---;
+    mov si, 0
+
+    ; looking left
+    fldpi
+    fld [dword ptr offset HALF]
+    fmulp ; pi * 0.5
+    fld [dword ptr offset cast_ray_ray_angle]
+    fcompp
+    fnstsw ax
+    sahf ; cmp player_angle, 0.5 * PI
+    jb cast_ray_not_looking_left_skip
+
+    fldpi
+    fld [dword ptr offset HALF]
+    fmulp ; pi * 0.5
+    fldpi
+    faddp ; pi * 1.5
+    fcompp
+    fnstsw ax
+    sahf
+    ja cast_ray_not_looking_left_skip
+        mov ax, [offset player_x]
+        shr ax, 4 ; change if block_size changes
+        shl ax, 4 ; change if block size changes
+        mov [offset cast_ray_fpu_io], ax
+        fild [word ptr offset cast_ray_fpu_io]
+        fld [dword ptr offset cast_ray_accuracy_number]
+        fsubp ; ((player_x >> 4) << 4) - accuracy_number
+        fstp [dword ptr offset cast_ray_ray_x]
+
+        fild [word ptr offset player_x]
+        fld [dword ptr offset cast_ray_ray_x]
+        fsubp ; player_x - ray_x
+        fld [dword ptr offset cast_ray_negative_tan]
+        fmulp ; (player_x - ray_x) * -tan(ray_angle)
+        fild [word ptr offset player_y]
+        faddp ; (player_x - ray_x) * -tan(ray_angle) + player_y
+        fstp [dword ptr offset cast_ray_ray_y] 
+
+        fild [word ptr offset BLOCK_SIZE]
+        fchs ; -BLOCK_SIZE
+        fst [dword ptr offset cast_ray_jump_x]
+
+        ; ST(0) = jumpX
+        fchs ; -jumpX
+        fld [dword ptr offset cast_ray_negative_tan]
+        fmulp ; -jumpX * -tan(ray_angle)
+        fstp [dword ptr offset cast_ray_jump_y]
+    cast_ray_not_looking_left_skip:
+
+    ; looking right
+    fldpi
+    fld [dword ptr offset HALF]
+    fmulp ; pi * 0.5
+    fld [dword ptr offset cast_ray_ray_angle]
+    fcompp
+    fnstsw ax
+    sahf ; cmp player_angle, pi * 0.5
+    jb cast_ray_looking_right
+
+    fldpi
+    fld [dword ptr offset HALF]
+    fmulp
+    fldpi
+    faddp ; pi * 1.5
+    fld [dword ptr offset cast_ray_ray_angle]
+    fcompp
+    fnstsw ax
+    sahf ; cmp player_angle, pi * 1.5
+    ja cast_ray_looking_right
+    jmp cast_ray_not_looking_right
+    cast_ray_looking_right:
+        mov ax, [offset player_x]
+        shr ax, 4 ; change if block size changes
+        shl ax, 4 ; change if block size changes
+        add ax, [offset BLOCK_SIZE]
+        mov [offset cast_ray_fpu_io], ax
+        fild [word ptr offset cast_ray_fpu_io]
+        ; ((player_x >> 6) << 6) + BLOCK_SIZE
+        fstp [dword ptr offset cast_ray_ray_x]
+
+        fild [word ptr offset player_x]
+        fld [dword ptr offset cast_ray_ray_x]
+        fsubp ; player_x - ray_x
+        fld [dword ptr offset cast_ray_negative_tan]
+        fmulp ; (player_x - ray_x) * -tan(ray_angle)
+        fild [word ptr offset player_y]
+        faddp ; (player_x - ray_x) * -tan(ray_angle) + player_y
+        fstp [dword ptr offset cast_ray_ray_y]
+
+        fild [word ptr offset BLOCK_SIZE]
+        ; BLOCK_SIZE
+        fst [dword ptr offset cast_ray_jump_x]
+
+        ; ST(0) = jumpX
+        fchs ; -jumpX
+        fld [dword ptr offset cast_ray_negative_tan]
+        fmulp ; -jumpX * -tan(ray_angle)
+        fstp [dword ptr offset cast_ray_jump_y]
+
+    cast_ray_not_looking_right:
+
+    ; draw_rect(ray_x, ray_y, width, height, 5)
+    fld [dword ptr offset cast_ray_ray_x]
+    fistp [word ptr offset cast_ray_fpu_io]
+    mov ax, [offset cast_ray_fpu_io]
+    fld [dword ptr offset cast_ray_ray_y]
+    fistp [word ptr offset cast_ray_fpu_io]
+    mov cx, [offset cast_ray_fpu_io]
+    mov bx, [offset PLAYER_WIDTH] ; width
+    mov di, 6 ; purple
+
+    push ax
+    push cx
+    push bx
+    push bx
+    push di
+    call draw_rect
+
+    fldpi
+    fld [dword ptr offset HALF]
+    fmulp ; pi * 0.5
+    fld [dword ptr offset cast_ray_ray_angle]
+    fcompp
+    fnstsw ax
+    sahf ; cmp player_angle, pi * 0.5
+    je cast_ray_vertical_looking_straight_up_or_down
+
+    fldpi
+    fldpi
+    fld [dword ptr offset HALF]
+    fmulp ; pi * 0.5
+    faddp ; pi * 1.5
+    fld [dword ptr offset cast_ray_ray_angle]
+    fcompp
+    fnstsw ax
+    sahf ; cmp player_angle, pi * 1.5
+    je cast_ray_vertical_looking_straight_up_or_down
+
+    jmp cast_ray_vertical_not_looking_straight_up_or_down
+    cast_ray_vertical_looking_straight_up_or_down:
+        jmp cast_ray_vertical_looking_up_or_down_skip
+    cast_ray_vertical_not_looking_straight_up_or_down:
+
+    cast_ray_vertical_loopstart:
+        fld [dword ptr offset cast_ray_ray_x]
+        fistp [word ptr offset cast_ray_fpu_io] ; (int)ray_x
+        mov bx, [offset cast_ray_fpu_io]
+        shr bx, 4 ; bx = mapX = ray_x >> 4 ; change if block size changes
+        fld [dword ptr offset cast_ray_ray_y]
+        fistp [word ptr offset cast_ray_fpu_io] ; (int)ray_y
+        mov dx, [offset cast_ray_fpu_io]
+        shr dx, 4 ; dx = mapY = ray_y /16 | change if block size changes
+
+        cmp bx, 0
+        jl cast_ray_vertical_out_of_bounds_skip
+
+        cmp dx, 0
+        jl cast_ray_vertical_out_of_bounds_skip
+
+        cmp bx, [word ptr offset MAP_WIDTH]
+        jge cast_ray_vertical_out_of_bounds_skip
+
+        cmp dx, [word ptr offset MAP_HEIGHT]
+        jge cast_ray_vertical_out_of_bounds_skip
+
+        push bx
+        push dx
+        call at_map
+        pop di ; map[y][x]
+        cmp di, 0
+        jne cast_ray_vertical_wall_tile
+
+        cast_ray_vertical_clear_tile:
+
+            fld [dword ptr offset cast_ray_ray_x]
+            fld [dword ptr offset cast_ray_jump_x]
+            faddp ; ray_x + jump_x
+            fstp [dword ptr offset cast_ray_ray_x]
+
+            fld [dword ptr offset cast_ray_ray_y]
+            fld [dword ptr offset cast_ray_jump_y]
+            faddp
+            fstp [dword ptr offset cast_ray_ray_y]
+
+            ; draw_rect(ray_x, ray_y, width, width, 2 (green))
+            fld [dword ptr offset cast_ray_ray_x]
+            call round_towards_zero
+            fistp [word ptr offset cast_ray_fpu_io]
+            mov cx, [offset cast_ray_fpu_io] ; ray_x
+            fld [dword ptr offset cast_ray_ray_y]
+            call round_towards_zero
+            fistp [word ptr offset cast_ray_fpu_io]
+            mov ax, [offset cast_ray_fpu_io] ; ray_y
+            mov bx, [offset PLAYER_WIDTH]
+            mov di, 6 ; purple
+
+            push cx
+            push ax
+            push bx
+            push bx
+            push di
+            call draw_rect
+            inc si
+            jmp cast_ray_vertical_in_loop_skip
+        cast_ray_vertical_wall_tile:
+            mov si, 8
+        cast_ray_vertical_in_loop_skip:
+
+        cmp si, 8
+        jb cast_ray_vertical_loopstart
+
+    cast_ray_vertical_out_of_bounds_skip:
+
+    cast_ray_vertical_looking_up_or_down_skip:
 
     popa
     pop bp
+    ret 2
+endp cast_ray
+
+; cast_sight_rays() -> None
+; cast 60 rays from player_angle - 30 degs to 
+; player_angle + 30 degs
+proc cast_sight_rays
     ret
-endp cast_rays
+endp cast_sight_rays
 
 proc main
     pusha
@@ -909,10 +1372,20 @@ proc main
     faddp
     fstp [dword ptr TWO_PI]
 
+    ; deleteme
+    fldpi
+    fstp [dword ptr offset player_angle]
+
     mov di, 0
 
     main_loopstart:
-
+        mov bx, offset keyboard_state + 7
+        mov al, [bx]
+        cmp al, 1
+        jne asdf123
+            push di
+            pop di
+        asdf123:
         ; game logic ;
         call move_player
 
@@ -921,7 +1394,10 @@ proc main
 
         call draw_map
         call draw_player
-        call cast_rays
+
+        mov ax, offset asdf
+        push ax
+        call cast_ray
 
         call draw_pressed_keys
 
