@@ -1519,8 +1519,7 @@ proc cast_sight_rays
     pusha
     mov bx, offset cast_sight_rays_fpu_io ;deleteme
 
-    mov ax, 0
-    ;mov ax, -30
+    mov ax, -30
     mov [offset cast_sight_rays_fpu_io], ax
     fild [word ptr offset cast_sight_rays_fpu_io]
     fld [dword ptr offset DEG2RAD]
@@ -1532,14 +1531,14 @@ proc cast_sight_rays
         push bx
         call cast_ray
 
-        ;mov [offset cast_sight_rays_fpu_io], ax
-        ;fild [word ptr offset cast_sight_rays_fpu_io]
-        ;fld [dword ptr offset DEG2RAD]
-        ;fmulp ; current_offset * deg2rad
-        ;fstp [dword ptr offset cast_sight_rays_current_angle]
-        ;inc ax
-        ;cmp ax, 30
-        ;jle cast_sight_rays_loopstart
+        mov [offset cast_sight_rays_fpu_io], ax
+        fild [word ptr offset cast_sight_rays_fpu_io]
+        fld [dword ptr offset DEG2RAD]
+        fmulp ; current_offset * deg2rad
+        fstp [dword ptr offset cast_sight_rays_current_angle]
+        inc ax
+        cmp ax, 30
+        jle cast_sight_rays_loopstart
 
     popa
     pop bp
