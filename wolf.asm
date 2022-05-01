@@ -13,6 +13,7 @@ ZERO dd 0.0
 HALF dd 0.5
 ONE dd 1.0
 DEG2RAD dd 0.0174533 ; multiply degrees by this for rads
+BIG_NUMBER dd 10000000.0
 
 PLAYER_WIDTH dw 6
 PLAYER_HEIGHT dw 6
@@ -40,6 +41,33 @@ DRAW_DIRECTION_SCALE dd 8.0
 ;;;;;;;;;;;;;LOCAL;;;VARIABLES;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+;---draw_player---;
+draw_player_fpu_out dw ?
+;-----------------;
+
+;---cast_ray---; size of 0x36 or 54.0
+cast_ray_a_tan dd ? ; ds:76
+cast_ray_negative_tan dd ?
+cast_ray_is_looking_up dw 0 ; ds:7E
+cast_ray_fpu_io dw ?
+cast_ray_ray_y dd ?
+cast_ray_ray_x dd ? ; ds:86
+cast_ray_jump_y dd ?
+cast_ray_jump_x dd ? ; ds:8E
+cast_ray_ray_angle dd ?
+cast_ray_accuracy_number dd 1.0
+cast_ray_storage dw ? ; ds:9A
+cast_ray_horizontal_ray_x dd ?
+cast_ray_horizontal_ray_y dd ?
+cast_ray_vertical_ray_x dd ? ; ds:A4
+cast_ray_vertical_ray_y dd ?
+cast_ray_horizontal_ray_length dd ?
+cast_ray_vertical_ray_length dd ?
+cast_ray_final_ray_x dd ? ; ds:AA
+cast_ray_final_ray_y dd ?
+cast_ray_is_vertical_hit dw 0 ; ds:00AC
+;--------------;
+
 ;---draw_line---;
 draw_line_fpu_io dd ?
 draw_line_delta_x dd ?
@@ -48,23 +76,16 @@ draw_line_x dd ?
 draw_line_y dd ?
 ;---------------;
 
-;---draw_player---;
-draw_player_fpu_out dw ?
+;---line_length---;
+line_length_fpu_io dw ?
+line_length_answer dd ?
 ;-----------------;
 
-;---cast_ray---;
-cast_ray_a_tan dd ?
-cast_ray_negative_tan dd ?
-cast_ray_is_looking_up dw 0 ; ds:8A
-cast_ray_fpu_io dw ?
-cast_ray_ray_y dd ? ; ds:92
-cast_ray_ray_x dd ?
-cast_ray_jump_y dd ?
-cast_ray_jump_x dd ?
-cast_ray_ray_angle dd ?
-cast_ray_accuracy_number dd 1.0
-cast_ray_storage dw ?
-;--------------;
+;---cast_sight_rays---;
+cast_sight_rays_fpu_io dd ?
+cast_sight_rays_current_angle dd ?
+;---------------------;
+
 
 ;---main---;
 asdf dd 0.5
@@ -76,7 +97,7 @@ asdf dd 0.5
 
 player_x dw 36h
 player_y dw 36h
-player_angle dd 0.9
+player_angle dd 2.5
 
 keyboard_state db 8 dup(0) ; w, a, s, d, dot, comma, esc, space
 
@@ -274,6 +295,46 @@ proc sin_angle_times_speed
     
     ret
 endp sin_angle_times_speed
+
+; line_length(x1, y1, x2, y2) -> *[dword] sqrt(abs(x2 -x 1) ^ 2 + abs(y2 - y1) ^ 2)
+proc line_length
+    push bp
+    mov bp, sp
+    pusha
+
+    mov ax, [bp+4]
+    sub ax, [bp+8] ; y2 - y1
+    jnc line_length_abs_skip1
+        neg ax
+    line_length_abs_skip1:
+    ; ax = abs(y2 - y1)
+
+    mov cx, [bp+6]
+    sub cx, [bp+10]
+    jnc line_length_abs_skip2
+        neg cx
+    line_length_abs_skip2:
+    ; cx = abs(x2 - x1)
+
+    mov [offset line_length_fpu_io], ax
+    fild [word ptr offset line_length_fpu_io]
+    fild [word ptr offset line_length_fpu_io]
+    fmulp ; abs(y2 - y1) ^ 2
+
+    mov [offset line_length_fpu_io], cx
+    fild [word ptr offset line_length_fpu_io]
+    fild [word ptr offset line_length_fpu_io]
+    fmulp ; abs(x2 - x1) ^ 2
+
+    faddp ; abs(y2 - y1) ^ 2 + abs(x2 - x1) ^ 2
+    fsqrt ; sqrt(abs(y2 - y1) ^ 2 + abs(x2 - x1) ^ 2)
+    fstp [dword ptr offset line_length_answer]
+    mov [word ptr bp+10], offset line_length_answer
+
+    popa
+    pop bp
+    ret 6
+endp line_length
 
 ; to_pos(x, y) -> y * 320 + x
 proc to_pos
@@ -893,6 +954,21 @@ proc cast_ray
     mov bp, sp
     pusha
 
+    ; zero all variables
+    mov bx, offset cast_ray_a_tan
+    mov di, offset cast_ray_is_vertical_hit + 2
+    cast_ray_zero_loopstart:
+        inc bx
+        cmp bx, di
+        jbe cast_ray_zero_loopstart
+
+    fld [dword ptr offset BIG_NUMBER]
+    fld ST(0)
+
+    ; set to big numbers by default
+    fstp [dword ptr offset cast_ray_horizontal_ray_length]
+    fstp [dword ptr offset cast_ray_vertical_ray_length]
+
     ; si = dof
     mov si, 0
 
@@ -1034,25 +1110,6 @@ proc cast_ray
         jmp cast_ray_horizontal_looking_left_or_right_skip
     cast_ray_looking_up_or_down_skip:
 
-    ; draw_rect(ray_x, ray_y, width, width, 2 (green))
-    fld [dword ptr offset cast_ray_ray_x]
-    call round_towards_zero
-    fistp [word ptr offset cast_ray_fpu_io]
-    mov cx, [offset cast_ray_fpu_io] ; ray_x
-    fld [dword ptr offset cast_ray_ray_y]
-    call round_towards_zero
-    fistp [word ptr offset cast_ray_fpu_io]
-    mov ax, [offset cast_ray_fpu_io] ; ray_y
-    mov bx, [offset PLAYER_WIDTH]
-    mov di, 2 ; green
-
-    push cx
-    push ax
-    push bx
-    push bx
-    push di
-    call draw_rect
-
     ; ax=free | bx=mapX | cx=free | dx=mapY | di=free | si=dof
     cast_ray_horizontal_loopstart:
         fld [dword ptr offset cast_ray_ray_x]
@@ -1096,36 +1153,66 @@ proc cast_ray
             faddp ; ray_y + jump_y
             fstp [dword ptr offset cast_ray_ray_y]
 
-            ; draw_rect(ray_x, ray_y, width, width, 2 (green))
-            fld [dword ptr offset cast_ray_ray_x]
-            call round_towards_zero
-            fistp [word ptr offset cast_ray_fpu_io]
-            mov cx, [offset cast_ray_fpu_io] ; ray_x
-            fld [dword ptr offset cast_ray_ray_y]
-            call round_towards_zero
-            fistp [word ptr offset cast_ray_fpu_io]
-            mov ax, [offset cast_ray_fpu_io] ; ray_y
-            mov bx, [offset PLAYER_WIDTH]
-            mov di, 2 ; green
-
-            push cx
-            push ax
-            push bx
-            push bx
-            push di
-            call draw_rect
-
-            inc si
             jmp cast_ray_horizontal_in_loop_skip
         cast_ray_horizontal_wall_tile:
             mov si, 8
+            jmp cast_ray_horizontal_in_loop_skip
+        cast_ray_horizontal_out_of_bounds_skip:
+            mov si, 9 ; tell function that it went out of bounds
         cast_ray_horizontal_in_loop_skip:
+        inc si
 
         cmp si, 8
         jb cast_ray_horizontal_loopstart
-    cast_ray_horizontal_out_of_bounds_skip:
 
     cast_ray_horizontal_looking_left_or_right_skip:
+
+    ;mov eax, [offset cast_ray_ray_x]
+    ;mov [offset cast_ray_horizontal_ray_x], eax
+
+    ;mov eax, [offset cast_ray_ray_y]
+    ;mov [offset cast_ray_horizontal_ray_y], eax
+    cmp si, 0Ah ; did it go out of bounds?
+    je cast_ray_horizontal_set_skip
+    fld [dword ptr offset cast_ray_ray_x]
+    fstp [dword ptr offset cast_ray_horizontal_ray_x]
+
+    fld [dword ptr offset cast_ray_ray_y]
+    fstp [dword ptr offset cast_ray_horizontal_ray_y]
+
+    fld [dword ptr offset cast_ray_horizontal_ray_x]
+    fild [word ptr offset player_x]
+    fsubp ; ray_x - player_x
+    fabs ; abs(ray_x - player_x)
+    fld ST(0)
+    fmulp ; abs(ray_x - player_x) ^ 2
+
+    fld [dword ptr offset cast_ray_horizontal_ray_y]
+    fild [word ptr offset player_y]
+    fsubp ; ray_y - player_y
+    fabs ; abs(ray_y - player_y)
+    fld ST(0)
+    fmulp ; abs(ray_y - player_y) ^ 2
+
+    faddp ; abs(ray_x - player_x) ^ 2 + abs(ray_y - player_y) ^ 2
+    fsqrt ; sqrt(abs(ray_x - player_x) ^ 2 + abs(ray_y - player_y) ^ 2)
+    fstp [dword ptr offset cast_ray_horizontal_ray_length]
+    cast_ray_horizontal_set_skip:
+
+    ;mov bx, [offset player_y] ; y1
+    ;mov dx, [offset player_x] ; x1
+
+    ;mov ax, [offset cast_ray_horizontal_ray_y] ; y2
+    ;mov cx, [offset cast_ray_horizontal_ray_x] ; x2
+
+    ;push bx
+    ;push dx
+    ;push ax
+    ;push cx
+    ;call line_length
+    ;pop bx ; *answer [dword]
+    ;fld [dword ptr bx]
+    ;fstp [dword ptr offset cast_ray_horizontal_ray_length]    
 
     ;--- vertical lines ---;
     mov si, 0
@@ -1240,13 +1327,6 @@ proc cast_ray
     mov bx, [offset PLAYER_WIDTH] ; width
     mov di, 6 ; purple
 
-    push ax
-    push cx
-    push bx
-    push bx
-    push di
-    call draw_rect
-
     fldpi
     fld [dword ptr offset HALF]
     fmulp ; pi * 0.5
@@ -1269,6 +1349,10 @@ proc cast_ray
 
     jmp cast_ray_vertical_not_looking_straight_up_or_down
     cast_ray_vertical_looking_straight_up_or_down:
+        fild [word ptr offset player_x]
+        fstp [dword ptr offset cast_ray_ray_x] ; ray_x = player_x
+        fild [word ptr offset player_y]
+        fstp [dword ptr offset cast_ray_ray_y]
         jmp cast_ray_vertical_looking_up_or_down_skip
     cast_ray_vertical_not_looking_straight_up_or_down:
 
@@ -1313,36 +1397,113 @@ proc cast_ray
             faddp
             fstp [dword ptr offset cast_ray_ray_y]
 
-            ; draw_rect(ray_x, ray_y, width, width, 2 (green))
-            fld [dword ptr offset cast_ray_ray_x]
-            call round_towards_zero
-            fistp [word ptr offset cast_ray_fpu_io]
-            mov cx, [offset cast_ray_fpu_io] ; ray_x
-            fld [dword ptr offset cast_ray_ray_y]
-            call round_towards_zero
-            fistp [word ptr offset cast_ray_fpu_io]
-            mov ax, [offset cast_ray_fpu_io] ; ray_y
-            mov bx, [offset PLAYER_WIDTH]
-            mov di, 6 ; purple
-
-            push cx
-            push ax
-            push bx
-            push bx
-            push di
-            call draw_rect
-            inc si
             jmp cast_ray_vertical_in_loop_skip
         cast_ray_vertical_wall_tile:
             mov si, 8
+            jmp cast_ray_vertical_in_loop_skip
+        cast_ray_vertical_out_of_bounds_skip:
+            mov si, 9
         cast_ray_vertical_in_loop_skip:
+        inc si
 
         cmp si, 8
         jb cast_ray_vertical_loopstart
 
-    cast_ray_vertical_out_of_bounds_skip:
-
     cast_ray_vertical_looking_up_or_down_skip:
+
+    ;mov eax, [offset cast_ray_ray_x]
+    ;mov [offset cast_ray_vertical_ray_x], eax
+
+    ;mov eax, [offset cast_ray_ray_y]
+    ;mov [offset cast_ray_vertical_ray_y], eax
+    cmp si, 0Ah
+    je cast_ray_vertical_set_skip
+    fld [dword ptr offset cast_ray_ray_x]
+    fstp [dword ptr offset cast_ray_vertical_ray_x]
+
+    fld [dword ptr offset cast_ray_ray_y]
+    fstp [dword ptr offset cast_ray_vertical_ray_y]
+
+    fld [dword ptr offset cast_ray_vertical_ray_x]
+    fild [word ptr offset player_x]
+    fsubp ; ray_x - player_x
+    fabs ; abs(ray_x - player_x)
+    fld ST(0)
+    fmulp ; abs(ray_x - player_x) ^ 2
+
+    fld [dword ptr offset cast_ray_vertical_ray_y]
+    fild [word ptr offset player_y]
+    fsubp ; ray_y - player_y
+    fabs ; abs(ray_y - player_y)
+    fld ST(0)
+    fmulp ; abs(ray_y - player_y) ^ 2
+
+    faddp ; abs(ray_x - player_x) ^ 2 + abs(ray_y - player_y) ^ 2
+    fsqrt ; sqrt(abs(ray_x - player_x) ^ 2 + abs(ray_y - player_y) ^ 2)
+    fstp [dword ptr offset cast_ray_vertical_ray_length]
+    cast_ray_vertical_set_skip:
+
+    ;--------------------drawing--------------------;
+    mov bx, offset cast_ray_horizontal_ray_x ; deleteme
+    fld [dword ptr offset cast_ray_vertical_ray_length]
+    fld [dword ptr offset cast_ray_horizontal_ray_length]
+    fcompp
+    fnstsw ax
+    sahf ; cmp horizontal_length, vertical_length
+    jb cast_ray_horizontal_length_shorter
+    cast_ray_vertical_length_shorter:
+        ;mov ax, [offset cast_ray_vertical_ray_x]
+        ;mov cx, [offset cast_ray_vertical_ray_y]
+        ;mov [offset cast_ray_final_ray_x], ax
+        ;mov [offset cast_ray_final_ray_y], cx
+        
+        mov bx, offset cast_ray_vertical_ray_x
+        fld [dword ptr offset cast_ray_vertical_ray_x]
+        fstp [dword ptr offset cast_ray_final_ray_x]
+    
+        fld [dword ptr offset cast_ray_vertical_ray_y]
+        fstp [dword ptr offset cast_ray_final_ray_y]
+        mov [word ptr offset cast_ray_is_vertical_hit], 1
+
+        jmp cast_ray_shorter_skip
+    cast_ray_horizontal_length_shorter:
+        ;mov ax, [offset cast_ray_horizontal_ray_x]
+        ;mov cx, [offset cast_ray_horizontal_ray_y]
+        ;mov [offset cast_ray_final_ray_x], ax
+        ;mov [offset cast_ray_final_ray_y], cx
+
+        fld [dword ptr offset cast_ray_horizontal_ray_x]
+        fstp [dword ptr offset cast_ray_final_ray_x]
+
+        fld [dword ptr offset cast_ray_horizontal_ray_y]
+        fstp [dword ptr offset cast_ray_final_ray_y]
+    cast_ray_shorter_skip:
+
+
+    fld [dword ptr offset cast_ray_final_ray_x]
+    fistp [word ptr offset cast_ray_fpu_io]
+    mov ax, [offset cast_ray_fpu_io]
+
+    fld [dword ptr offset cast_ray_final_ray_y]
+    fistp [word ptr offset cast_ray_fpu_io]
+    mov cx, [offset cast_ray_fpu_io]
+
+    push ax
+    push cx
+    mov dx, 4
+    push dx
+    push dx
+    mov di, 1h
+    push di
+    call draw_rect
+
+    ; 04h = dark red
+    ; 0Ch = light red
+
+
+
+    ;-----------------------------------------------;
+
 
     popa
     pop bp
@@ -1353,6 +1514,35 @@ endp cast_ray
 ; cast 60 rays from player_angle - 30 degs to 
 ; player_angle + 30 degs
 proc cast_sight_rays
+    push bp
+    mov bp, sp
+    pusha
+    mov bx, offset cast_sight_rays_fpu_io ;deleteme
+
+    mov ax, 0
+    ;mov ax, -30
+    mov [offset cast_sight_rays_fpu_io], ax
+    fild [word ptr offset cast_sight_rays_fpu_io]
+    fld [dword ptr offset DEG2RAD]
+    fmulp ; -30 * deg2rad
+    fstp [dword ptr offset cast_sight_rays_current_angle]
+
+    cast_sight_rays_loopstart:
+        mov bx, offset cast_sight_rays_current_angle
+        push bx
+        call cast_ray
+
+        ;mov [offset cast_sight_rays_fpu_io], ax
+        ;fild [word ptr offset cast_sight_rays_fpu_io]
+        ;fld [dword ptr offset DEG2RAD]
+        ;fmulp ; current_offset * deg2rad
+        ;fstp [dword ptr offset cast_sight_rays_current_angle]
+        ;inc ax
+        ;cmp ax, 30
+        ;jle cast_sight_rays_loopstart
+
+    popa
+    pop bp
     ret
 endp cast_sight_rays
 
@@ -1371,10 +1561,6 @@ proc main
     fldpi
     faddp
     fstp [dword ptr TWO_PI]
-
-    ; deleteme
-    fldpi
-    fstp [dword ptr offset player_angle]
 
     mov di, 0
 
@@ -1395,9 +1581,10 @@ proc main
         call draw_map
         call draw_player
 
-        mov ax, offset asdf
-        push ax
-        call cast_ray
+        ;mov ax, offset asdf
+        ;push ax
+        ;call cast_ray
+        call cast_sight_rays
 
         call draw_pressed_keys
 
@@ -1428,6 +1615,8 @@ endp main
 start:
 	mov ax, @data
 	mov ds, ax
+
+    mov bx, offset cast_ray_vertical_ray_x
 	
     call change_handler_and_run_main
 
