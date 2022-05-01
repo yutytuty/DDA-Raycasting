@@ -19,6 +19,7 @@ PLAYER_WIDTH dw 6
 PLAYER_HEIGHT dw 6
 PLAYER_SPEED dd 1.0
 PLAYER_TURN_SPEED dd 0.1
+WALL_WIDTH dw 5
 
 BLOCK_SIZE dw 16
 MAP_WIDTH dw 8
@@ -65,7 +66,10 @@ cast_ray_horizontal_ray_length dd ?
 cast_ray_vertical_ray_length dd ?
 cast_ray_final_ray_x dd ? ; ds:AA
 cast_ray_final_ray_y dd ?
-cast_ray_is_vertical_hit dw 0 ; ds:00AC
+cast_ray_final_ray_length dd ?
+cast_ray_is_vertical_hit dw 0
+cast_ray_wall_height dd ? ; ds:C4
+cast_ray_wall_offset dd ?
 ;--------------;
 
 ;---draw_line---;
@@ -97,7 +101,7 @@ asdf dd 0.5
 
 player_x dw 36h
 player_y dw 36h
-player_angle dd 2.5
+player_angle dd 0.1
 
 keyboard_state db 8 dup(0) ; w, a, s, d, dot, comma, esc, space
 
@@ -399,10 +403,10 @@ proc clear_screen
     pusha
 
     mov bx, offset back_buffer
-    add bx, 320 * 200
+    add bx, 320 * 100
     mov ax, offset back_buffer
 
-    mov edx, 08080808h
+    mov edx, 01010101h
 
     sub bx, 4
 
@@ -411,6 +415,24 @@ proc clear_screen
         sub bx, 4
         cmp bx, ax
         jne clearLoopstart
+
+    mov [bx], edx
+
+
+    mov bx, offset back_buffer
+    add bx, 320 * 200
+    mov ax, offset back_buffer
+    add ax, 320 * 100
+
+    mov edx, 02020202h
+
+    sub bx, 4
+
+    clearLoopstart2:
+        mov [bx], edx
+        sub bx, 4
+        cmp bx, ax
+        jne clearLoopstart2
 
     mov [bx], edx
 
@@ -948,7 +970,7 @@ proc move_player
     ret
 endp move_player
 
-; cast_ray([float] *offset) -> None
+; cast_ray(iteration, [float] *offset) -> None
 proc cast_ray
     push bp
     mov bp, sp
@@ -956,7 +978,7 @@ proc cast_ray
 
     ; zero all variables
     mov bx, offset cast_ray_a_tan
-    mov di, offset cast_ray_is_vertical_hit + 2
+    mov di, offset cast_ray_wall_offset + 4
     cast_ray_zero_loopstart:
         inc bx
         cmp bx, di
@@ -1444,7 +1466,8 @@ proc cast_ray
     cast_ray_vertical_set_skip:
 
     ;--------------------drawing--------------------;
-    mov bx, offset cast_ray_horizontal_ray_x ; deleteme
+    mov ax, 0
+    mov [cast_ray_is_vertical_hit], ax
     fld [dword ptr offset cast_ray_vertical_ray_length]
     fld [dword ptr offset cast_ray_horizontal_ray_length]
     fcompp
@@ -1463,6 +1486,11 @@ proc cast_ray
     
         fld [dword ptr offset cast_ray_vertical_ray_y]
         fstp [dword ptr offset cast_ray_final_ray_y]
+
+        fld [dword ptr offset cast_ray_vertical_ray_length]
+        fstp [dword ptr offset cast_ray_final_ray_length]
+
+        mov bx, offset cast_ray_is_vertical_hit
         mov [word ptr offset cast_ray_is_vertical_hit], 1
 
         jmp cast_ray_shorter_skip
@@ -1477,6 +1505,9 @@ proc cast_ray
 
         fld [dword ptr offset cast_ray_horizontal_ray_y]
         fstp [dword ptr offset cast_ray_final_ray_y]
+
+        fld [dword ptr offset cast_ray_horizontal_ray_length]
+        fstp [dword ptr offset cast_ray_final_ray_length]
     cast_ray_shorter_skip:
 
 
@@ -1488,26 +1519,86 @@ proc cast_ray
     fistp [word ptr offset cast_ray_fpu_io]
     mov cx, [offset cast_ray_fpu_io]
 
-    push ax
-    push cx
-    mov dx, 4
-    push dx
-    push dx
-    mov di, 1h
-    push di
-    call draw_rect
+    ;push ax
+    ;push cx
+    ;mov dx, 4
+    ;push dx
+    ;push dx
+    ;mov di, 1h
+    ;push di
+    ;call draw_rect
 
     ; 04h = dark red
     ; 0Ch = light red
 
 
+    ; wall_height
+    ; ((BLOCK_SIZE * 320) / ray_length) / cos(player_angle - ray_angle)
+    mov bx, offset cast_ray_wall_height
+    fild [word ptr offset BLOCK_SIZE]
+    mov [word ptr offset cast_ray_fpu_io], 320
+    fild [word ptr offset cast_ray_fpu_io]
+    fmulp ; BLOCK_SIZE * 320
+
+    fld [dword ptr offset cast_ray_final_ray_length]
+    fdivp ; (BLOCK_SIZE * 320) / ray_length
+
+    fld [dword ptr offset player_angle]
+    fld [dword ptr offset cast_ray_ray_angle]
+    fsubp
+    fcos ; cos(player_angle - ray_angle)
+
+    fdivp ; ((BLOCK_SIZE * 320) / ray_length) / cos(player_angle - ray_angle)
+
+    mov ax, 2
+    mov [offset cast_ray_fpu_io], ax
+    fild [word ptr offset cast_ray_fpu_io]
+    fdivp
+    fstp [dword ptr offset cast_ray_wall_height]
+
+    ; wall_offset
+    ; 160 - wall_height / 2
+    fld [dword ptr offset cast_ray_wall_height]
+    mov [word ptr offset cast_ray_fpu_io], 2
+    fild [word ptr offset cast_ray_fpu_io]
+    fdivp ; wall_height / 2
+    mov [word ptr offset cast_ray_fpu_io], 100
+    fild [word ptr offset cast_ray_fpu_io]
+    fsubrp ; 160 - wall_height / 2
+    fstp [dword ptr offset cast_ray_wall_offset]
+
+    mov ax, [bp+6] ; iteration
+    push ax
+    mov ax, [offset WALL_WIDTH]
+    push ax
+    call mult ; i * wall_width <-rect
+
+    fld [dword ptr cast_ray_wall_offset]
+    fistp [dword ptr offset cast_ray_fpu_io]
+    mov ax, [offset cast_ray_fpu_io]
+    push ax ; (int)wall_offset <-rect
+    mov ax, [offset WALL_WIDTH]
+    push ax ; wall_width <-rect
+    fld [dword ptr offset cast_ray_wall_height]
+    fistp [dword ptr offset cast_ray_fpu_io]
+    mov ax, [offset cast_ray_fpu_io]
+    push ax ; wall_height <-rect
+    cmp [word ptr offset cast_ray_is_vertical_hit], 0
+    je cast_ray_is_vertical_hit_skip1
+        mov ax, 0Ch
+        jmp cast_ray_is_vertical_hit_skip2
+    cast_ray_is_vertical_hit_skip1:
+        mov ax, 04h
+    cast_ray_is_vertical_hit_skip2:
+    push ax
+    call draw_rect
 
     ;-----------------------------------------------;
 
 
     popa
     pop bp
-    ret 2
+    ret 4
 endp cast_ray
 
 ; cast_sight_rays() -> None
@@ -1525,8 +1616,10 @@ proc cast_sight_rays
     fld [dword ptr offset DEG2RAD]
     fmulp ; -30 * deg2rad
     fstp [dword ptr offset cast_sight_rays_current_angle]
+    mov di, 0
 
     cast_sight_rays_loopstart:
+        push di ; iteration
         mov bx, offset cast_sight_rays_current_angle
         push bx
         call cast_ray
@@ -1536,8 +1629,9 @@ proc cast_sight_rays
         fld [dword ptr offset DEG2RAD]
         fmulp ; current_offset * deg2rad
         fstp [dword ptr offset cast_sight_rays_current_angle]
+        inc di
         inc ax
-        cmp ax, 30
+        cmp ax, 33
         jle cast_sight_rays_loopstart
 
     popa
@@ -1564,28 +1658,21 @@ proc main
     mov di, 0
 
     main_loopstart:
-        mov bx, offset keyboard_state + 7
-        mov al, [bx]
-        cmp al, 1
-        jne asdf123
-            push di
-            pop di
-        asdf123:
         ; game logic ;
         call move_player
 
         ; game graphics ;
         call clear_screen
 
-        call draw_map
-        call draw_player
-
         ;mov ax, offset asdf
         ;push ax
         ;call cast_ray
         call cast_sight_rays
 
-        call draw_pressed_keys
+        ;call draw_map
+        ;call draw_player
+
+        ;call draw_pressed_keys
 
         ; swap buffers ;
         call wait_for_VSync
