@@ -1639,27 +1639,17 @@ proc main
 
     mov di, 0
 
+    yuiop:
+
     mov ax, offset file_name
     push ax
     call PrintBmp
 
     menu_loopstart:
 
-        ; swap buffers ;
-        ;call clear_screen
-        ;call wait_for_VSync
-        ;mov ax, 320*200
-        ;push ax
-        ;mov ax, offset back_buffer
-        ;push ax
-        ;mov ax, 0
-        ;push ax
-        ;call memcpy
-        ; swap buffers ;
-
-        mov bx, offset keyboard_state
-        add bx, 6 ; esc
-        cmp [word ptr bx], 1
+        mov bx, offset keyboard_state + 6
+        mov al, [bx]
+        cmp al, 1
         je main_skip
 
         mov bx, offset keyboard_state
